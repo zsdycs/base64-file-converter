@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="zh-cn">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Base64 文件转换工具</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1, h2 {
+            color: #333;
+            margin-bottom: 20px;
+        }
+        h1 {
+            text-align: center;
+            color: #2c3e50;
+        }
+        .section {
+            margin-bottom: 30px;
+            padding: 20px;
+            background-color: #f8f9fa;
+            border-radius: 6px;
+        }
+        .file-input-container {
+            margin-bottom: 20px;
+        }
+        .file-input-label {
+            display: block;
+            padding: 10px;
+            background-color: #3498db;
+            color: white;
+            border-radius: 4px;
+            cursor: pointer;
+            text-align: center;
+            transition: background-color 0.3s;
+        }
+        .file-input-label:hover {
+            background-color: #2980b9;
+        }
+        input[type="file"] {
+            display: none;
+        }
+        .progress-container {
+            margin-top: 10px;
+            display: none;  /* 默认隐藏进度条容器 */
+        }
+        .progress-container.visible {
+            display: block;  /* 当需要显示时设置为可见 */
+        }
+        .progress-bar {
+            width: 100%;
+            background-color: #f3f3f3;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            overflow: hidden;
+        }
+        .progress-bar-fill {
+            height: 20px;
+            background-color: #2ecc71;
+            width: 0%;
+            text-align: center;
+            line-height: 20px;
+            color: white;
+            transition: width 0.3s ease;
+        }
+        .message-area {
+            margin-top: 20px;
+            padding: 10px;
+            border-radius: 4px;
+            display: none;
+        }
+        .message-area.success {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .message-area.error {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .message-area.info {
+            background-color: #cce5ff;
+            color: #004085;
+            border: 1px solid #b8daff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Base64 文件转换工具</h1>
+
+        <div class="section">
+            <h2>1. 文件转 Base64 文本</h2>
+            <div class="file-input-container">
+                <label class="file-input-label" for="fileInput">选择文件转换为Base64文本</label>
+                <input type="file" id="fileInput" />
+            </div>
+            <div class="progress-container" id="uploadProgressContainer">
+                <div class="progress-bar">
+                    <div class="progress-bar-fill" id="uploadProgress">0%</div>
+                </div>
+            </div>
+            <div id="uploadMessage" class="message-area"></div>
+        </div>
+
+        <div class="section">
+            <h2>2. Base64 文本转文件</h2>
+            <div class="file-input-container">
+                <label class="file-input-label" for="base64FileInput">选择Base64文本文件转换为原文件（可多选）</label>
+                <input type="file" id="base64FileInput" accept=".txt" multiple />
+            </div>
+            <div class="progress-container" id="downloadProgressContainer">
+                <div class="progress-bar">
+                    <div class="progress-bar-fill" id="downloadProgress">0%</div>
+                </div>
+            </div>
+            <div id="downloadMessage" class="message-area"></div>
+        </div>
+    </div>
+
+    <script>
+        const CHUNK_SIZE = 10 * 1024 * 1024; // 2MB
+        let worker;
+        let currentFile = null;
+        let currentBase64Output = '';
+        let downloadQueue = [];
+        let isDownloading = false;
+
+        function showMessage(elementId, message, isError = false) {
+            const messageElement = document.getElementById(elementId);
+            messageElement.textContent = message;
+            messageElement.className = `message-area ${isError ? 'error' : 'success'}`;
+            messageElement.style.display = 'block';
+        }
+
+        function getCurrentDateTime() {
+            const now = new Date();
+            const year = now.getFullYear();
+            const month = String(now.getMonth() + 1).padStart(2, '0');
+            const day = String(now.getDate()).padStart(2, '0');
+            const hours = String(now.getHours()).padStart(2, '0');
+            const minutes = String(now.getMinutes()).padStart(2, '0');
+            const seconds = String(now.getSeconds()).padStart(2, '0');
+            return `${year}-${month}-${day}-${hours}-${minutes}-${seconds}`;
+        }
+
+        // 创建 Web Worker
+        function createWorker() {
+            if (worker) {
+                worker.terminate();
+            }
+            worker = new Worker(URL.createObjectURL(new Blob([`
+                onmessage = async function (event) {
+                    const { type, file, base64Data, chunkSize, offset, chunks } = event.data;
+
+                    if (type === 'fileToBase64') {
+                        const fileName = file.name;
+                        const fileSize = file.size;
+                        const chunk = file.slice(offset, offset + chunkSize);
+                        const reader = new FileReader();
+                        
+                        reader.onload = function (e) {
+                            const base64Chunk = e.target.result.split(',')[1];
+                            const progress = Math.min(100, ((offset + chunk.size) / fileSize) * 100);
+                            postMessage({ 
+                                progress, 
+                                base64Chunk,
+                                isComplete: offset + chunk.size >= fileSize,
+                                processedSize: offset + chunk.size,
+                                fileSize,
+                                fileName: offset === 0 ? fileName : null
+                            });
+                        };
+
+                        reader.onerror = function (error) {
+                            postMessage({ error: '读取文件块时出错: ' + error.message });
+                        };
+
+                        reader.readAsDataURL(chunk);
+                    } else if (type === 'base64ToFile') {
+                        try {
+                            // 解析分片信息
+                            const fileInfo = {};
+                            let base64Content = base64Data;
+                            
+                            // 查找并解析所有元信息
+                            const metaInfoPattern = /\\[\\[([^:]+):([^\\]]+)\\]\\]/g;
+                            let metaMatch;
+                            let lastIndex = 0;
+                            
+                            while ((metaMatch = metaInfoPattern.exec(base64Data)) !== null) {
+                                const key = metaMatch[1];
+                                const value = metaMatch[2];
+                                fileInfo[key] = value;
+                                lastIndex = metaMatch.index + metaMatch[0].length;
+                            }
+                            
+                            // 检查必要的文件信息
+                            if (!fileInfo.FileName) {
+                                postMessage({ error: 'Base64 数据格式错误：找不到文件名信息！' });
+                                return;
+                            }
+                            
+                            // 获取实际的Base64内容（去除元信息后的部分）
+                            base64Content = base64Data.substring(lastIndex).trim();
+                            
+                            // 检查Base64内容是否为空
+                            if (!base64Content) {
+                                postMessage({ error: 'Base64 数据为空！' });
+                                return;
+                            }
+
+                            try {
+                                // 一次性处理完整的Base64数据
+                                const byteCharacters = atob(base64Content);
+                                const byteNumbers = new Array(byteCharacters.length);
+                                for (let j = 0; j < byteCharacters.length; j++) {
+                                    byteNumbers[j] = byteCharacters.charCodeAt(j);
+                                }
+                                const byteArray = new Uint8Array(byteNumbers);
+                                
+                                postMessage({ 
+                                    fileName: fileInfo.FileName,
+                                    fileSize: fileInfo.FileSize,
+                                    byteArray: byteArray,
+                                    progress: 100
+                                });
+                            } catch (e) {
+                                postMessage({ error: 'Base64 数据解码错误：请确保复制了完整的文本，没有遗漏或多余的字符。' + e.message  });
+                                return;
+                            }
+                        } catch (error) {
+                            postMessage({ error: '处理Base64数据时出错: ' + error.message });
+                        }
+                    } else if (type === 'mergeChunks') {
+                        try {
+                            const { chunks: chunkData, totalChunks, fileName, fileSize } = event.data.chunks;
+                            
+                            // 分别解码每个分片并收集二进制数据
+                            const chunksData = [];
+                            for (let i = 0; i < totalChunks; i++) {
+                                if (!chunkData[i]) {
+                                    throw new Error('缺少分片 ' + (i + 1));
+                                }
+                                // 清理Base64内容
+                                const cleanBase64 = chunkData[i].replace(/\\s+/g, '');
+                                // 解码当前分片
+                                const byteCharacters = atob(cleanBase64);
+                                const byteNumbers = new Array(byteCharacters.length);
+                                for (let j = 0; j < byteCharacters.length; j++) {
+                                    byteNumbers[j] = byteCharacters.charCodeAt(j);
+                                }
+                                chunksData.push(new Uint8Array(byteNumbers));
+                                
+                                // 发送进度更新
+                                const progress = Math.floor((i + 1) / totalChunks * 100);
+                                postMessage({ progress });
+                            }
+
+                            // 计算总大小
+                            const totalSize = chunksData.reduce((sum, chunk) => sum + chunk.length, 0);
+                            
+                            // 创建合并后的数组
+                            const mergedArray = new Uint8Array(totalSize);
+                            let offset = 0;
+                            
+                            // 按顺序合并所有分片数据
+                            for (const chunk of chunksData) {
+                                mergedArray.set(chunk, offset);
+                                offset += chunk.length;
+                            }
+                            
+                            postMessage({ 
+                                fileName,
+                                fileSize,
+                                byteArray: mergedArray,
+                                progress: 100
+                            });
+                        } catch (error) {
+                            postMessage({ error: '合并分片时出错: ' + error.message });
+                        }
+                    }
+                };
+            `], { type: 'text/javascript' })));
+        }
+
+        // 文件转 Base64
+        function convertFileToBase64(file) {
+            currentFile = file;
+            const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+            
+            const progressContainer = document.getElementById('uploadProgressContainer');
+            const progress = document.getElementById('uploadProgress');
+            progressContainer.classList.add('visible');  // 显示进度条容器
+            progress.style.width = '0%';
+            progress.textContent = '0%';
+
+            processNextChunk(0, totalChunks);
+        }
+
+        function processNextChunk(offset, totalChunks) {
+            if (!currentFile) return;
+
+            const chunkIndex = Math.floor(offset / CHUNK_SIZE);
+            createWorker();
+            worker.postMessage({ 
+                type: 'fileToBase64', 
+                file: currentFile, 
+                chunkSize: CHUNK_SIZE,
+                offset: offset,
+                chunkIndex: chunkIndex,
+                totalChunks: totalChunks
+            });
+
+            worker.onmessage = function (event) {
+                if (event.data.error) {
+                    showMessage('uploadMessage', event.data.error, true);
+                    return;
+                }
+
+                if (event.data.progress) {
+                    const progress = document.getElementById('uploadProgress');
+                    progress.style.width = `${event.data.progress}%`;
+                    const processedSize = (event.data.processedSize / (1024 * 1024)).toFixed(2);
+                    const totalSize = (event.data.fileSize / (1024 * 1024)).toFixed(2);
+                    progress.textContent = `${event.data.progress.toFixed(2)}% (${processedSize}MB/${totalSize}MB)`;
+                }
+
+                if (event.data.base64Chunk) {
+                    // 为每个分片添加分片信息和文件信息
+                    const chunkInfo = `[[FileName:${currentFile.name}]][[FileSize:${currentFile.size}]][[ChunkIndex:${chunkIndex}]][[TotalChunks:${totalChunks}]]`;
+                    const base64Output = chunkInfo + event.data.base64Chunk;
+                    
+                    // 将分片添加到下载队列
+                    downloadQueue.push({
+                        content: base64Output,
+                        index: chunkIndex,
+                        total: totalChunks,
+                        fileName: currentFile.name
+                    });
+
+                    // 如果当前没有正在进行的下载，开始处理下载队列
+                    if (!isDownloading) {
+                        processDownloadQueue();
+                    }
+                }
+
+                if (event.data.isComplete) {
+                    // 等待所有分片下载完成
+                    const checkDownloadComplete = setInterval(() => {
+                        if (downloadQueue.length === 0 && !isDownloading) {
+                            clearInterval(checkDownloadComplete);
+                            showMessage('uploadMessage', '文件转换完成！所有分片已下载。');
+                            currentFile = null;
+                        }
+                    }, 1000);
+                } else {
+                    processNextChunk(offset + CHUNK_SIZE, totalChunks);
+                }
+            };
+        }
+
+        function processDownloadQueue() {
+            if (downloadQueue.length === 0) {
+                isDownloading = false;
+                return;
+            }
+
+            isDownloading = true;
+            const chunk = downloadQueue.shift();
+            
+            try {
+                const blob = new Blob([chunk.content], { type: 'text/plain' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `Base64-${getCurrentDateTime()}-${chunk.index + 1}-${chunk.total}-${chunk.fileName}.txt`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+
+                // 添加短暂延迟，避免浏览器下载队列堵塞
+                setTimeout(() => {
+                    processDownloadQueue();
+                }, 100);
+            } catch (error) {
+                showMessage('uploadMessage', `分片 ${chunk.index + 1} 下载失败: ${error.message}`, true);
+                // 将失败的分片重新加入队列
+                downloadQueue.push(chunk);
+                // 等待一段时间后重试
+                setTimeout(() => {
+                    processDownloadQueue();
+                }, 1000);
+            }
+        }
+
+        // Base64 文本转文件
+        function convertBase64ToFile(files) {
+            const progressContainer = document.getElementById('downloadProgressContainer');
+            const progress = document.getElementById('downloadProgress');
+            progressContainer.classList.add('visible');  // 显示进度条容器
+            progress.style.width = '0%';
+            progress.textContent = '0%';
+
+            // 显示读取文件进度
+            const messageElement = document.getElementById('downloadMessage');
+            messageElement.textContent = `正在读取 ${files.length} 个文件...`;
+            messageElement.className = 'message-area info';
+            messageElement.style.display = 'flex';
+
+            // 创建文件信息对象
+            const fileInfo = {
+                fileName: null,
+                fileSize: null,
+                chunks: [],
+                totalChunks: 0
+            };
+
+            // 读取所有文件
+            let filesProcessed = 0;
+            for (let i = 0; i < files.length; i++) {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    filesProcessed++;
+                    // 更新读取进度
+                    messageElement.textContent = `正在读取文件 (${filesProcessed}/${files.length})...`;
+                    
+                    const base64Input = e.target.result;
+                    
+                    // 解析分片信息
+                    const metaInfoPattern = /\[\[([^:]+):([^\]]+)\]\]/g;
+                    const chunkInfo = {};
+                    let lastIndex = 0;
+                    let metaMatch;
+                    
+                    while ((metaMatch = metaInfoPattern.exec(base64Input)) !== null) {
+                        const key = metaMatch[1];
+                        const value = metaMatch[2];
+                        chunkInfo[key] = value;
+                        lastIndex = metaMatch.index + metaMatch[0].length;
+                    }
+
+                    // 更新文件信息
+                    if (chunkInfo.FileName) fileInfo.fileName = chunkInfo.FileName;
+                    if (chunkInfo.FileSize) fileInfo.fileSize = chunkInfo.FileSize;
+                    if (chunkInfo.ChunkIndex) {
+                        const chunkIndex = parseInt(chunkInfo.ChunkIndex);
+                        const totalChunks = parseInt(chunkInfo.TotalChunks);
+                        fileInfo.totalChunks = totalChunks;
+                        
+                        // 提取Base64内容
+                        const base64Content = base64Input.substring(lastIndex).trim();
+                        fileInfo.chunks[chunkIndex] = base64Content;
+                    }
+
+                    if (filesProcessed === files.length) {
+                        // 所有文件处理完成，开始合并
+                        messageElement.textContent = '文件读取完成，开始处理...';
+                        mergeChunks(fileInfo);
+                    }
+                };
+                reader.readAsText(files[i]);
+            }
+        }
+
+        function mergeChunks(fileInfo) {
+            if (!fileInfo.fileName || !fileInfo.fileSize || fileInfo.chunks.length !== fileInfo.totalChunks) {
+                showMessage('downloadMessage', '文件信息不完整或分片数量不匹配！', true);
+                return;
+            }
+
+            createWorker();
+            worker.postMessage({ 
+                type: 'mergeChunks',
+                chunks: {
+                    chunks: fileInfo.chunks,
+                    totalChunks: fileInfo.totalChunks,
+                    fileName: fileInfo.fileName,
+                    fileSize: fileInfo.fileSize
+                }
+            });
+
+            worker.onmessage = function(event) {
+                if (event.data.error) {
+                    showMessage('downloadMessage', event.data.error, true);
+                    return;
+                }
+
+                if (event.data.progress) {
+                    const progress = document.getElementById('downloadProgress');
+                    progress.style.width = `${event.data.progress}%`;
+                    progress.textContent = `${event.data.progress}%`;
+                }
+
+                if (event.data.fileName && event.data.byteArray) {
+                    try {
+                        const blob = new Blob([event.data.byteArray], { type: 'application/octet-binary' });
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = event.data.fileName;
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        URL.revokeObjectURL(url);
+                        showMessage('downloadMessage', '文件下载完成！');
+                    } catch (error) {
+                        showMessage('downloadMessage', '创建文件时出错: ' + error.message, true);
+                    }
+                }
+            };
+        }
+
+        // 文件选择事件处理
+        document.getElementById('fileInput').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (file) {
+                convertFileToBase64(file);
+            }
+        });
+
+        document.getElementById('base64FileInput').addEventListener('change', function(e) {
+            const files = Array.from(e.target.files);
+            if (files.length > 0) {
+                convertBase64ToFile(files);
+            }
+        });
+    </script>
+</body>
+</html>
