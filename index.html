@@ -33,6 +33,41 @@
             background-color: #f8f9fa;
             border-radius: 6px;
         }
+        .format-selector {
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .format-selector label {
+            font-weight: bold;
+            color: #333;
+        }
+        .format-selector select {
+            padding: 5px 10px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+        }
+        .chunk-size-input {
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .chunk-size-input label {
+            font-weight: bold;
+            color: #333;
+        }
+        .chunk-size-input input {
+            padding: 5px 10px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+            width: 100px;
+        }
+        .chunk-size-input span {
+            color: #666;
+            font-size: 0.9em;
+        }
         .file-input-container {
             margin-bottom: 20px;
         }
@@ -108,6 +143,18 @@
 
         <div class="section">
             <h2>1. 文件转 Base64 文本</h2>
+            <div class="format-selector">
+                <label for="outputFormat">输出格式：</label>
+                <select id="outputFormat">
+                    <option value="xlsx">Excel 文件</option>
+                    <option value="txt">TXT 文件</option>
+                </select>
+            </div>
+            <div class="chunk-size-input">
+                <label for="chunkSize">分片大小：</label>
+                <input type="number" id="chunkSize" value="10" min="1" max="100" />
+                <span>MB</span>
+            </div>
             <div class="file-input-container">
                 <label class="file-input-label" for="fileInput">选择文件转换为Base64文本</label>
                 <input type="file" id="fileInput" />
@@ -123,8 +170,8 @@
         <div class="section">
             <h2>2. Base64 文本转文件</h2>
             <div class="file-input-container">
-                <label class="file-input-label" for="base64FileInput">选择Base64文本文件转换为原文件（可多选）</label>
-                <input type="file" id="base64FileInput" accept=".txt" multiple />
+                <label class="file-input-label" for="base64FileInput">选择Base64文件转换为原文件（可多选）</label>
+                <input type="file" id="base64FileInput" accept=".txt,.xlsx" multiple />
             </div>
             <div class="progress-container" id="downloadProgressContainer">
                 <div class="progress-bar">
@@ -159,6 +206,12 @@
             const minutes = String(now.getMinutes()).padStart(2, '0');
             const seconds = String(now.getSeconds()).padStart(2, '0');
             return `${year}-${month}-${day}-${hours}-${minutes}-${seconds}`;
+        }
+
+        function getChunkSize() {
+            const chunkSizeInput = document.getElementById('chunkSize');
+            const sizeInMB = parseInt(chunkSizeInput.value) || 10;
+            return sizeInMB * 1024 * 1024; // Convert MB to bytes
         }
 
         // 创建 Web Worker
@@ -304,7 +357,8 @@
         // 文件转 Base64
         function convertFileToBase64(file) {
             currentFile = file;
-            const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+            const chunkSize = getChunkSize();
+            const totalChunks = Math.ceil(file.size / chunkSize);
             
             const progressContainer = document.getElementById('uploadProgressContainer');
             const progress = document.getElementById('uploadProgress');
@@ -312,18 +366,18 @@
             progress.style.width = '0%';
             progress.textContent = '0%';
 
-            processNextChunk(0, totalChunks);
+            processNextChunk(0, totalChunks, chunkSize);
         }
 
-        function processNextChunk(offset, totalChunks) {
+        function processNextChunk(offset, totalChunks, chunkSize) {
             if (!currentFile) return;
 
-            const chunkIndex = Math.floor(offset / CHUNK_SIZE);
+            const chunkIndex = Math.floor(offset / chunkSize);
             createWorker();
             worker.postMessage({ 
                 type: 'fileToBase64', 
                 file: currentFile, 
-                chunkSize: CHUNK_SIZE,
+                chunkSize: chunkSize,
                 offset: offset,
                 chunkIndex: chunkIndex,
                 totalChunks: totalChunks
@@ -372,7 +426,7 @@
                         }
                     }, 1000);
                 } else {
-                    processNextChunk(offset + CHUNK_SIZE, totalChunks);
+                    processNextChunk(offset + chunkSize, totalChunks, chunkSize);
                 }
             };
         }
@@ -385,13 +439,15 @@
 
             isDownloading = true;
             const chunk = downloadQueue.shift();
+            const outputFormat = document.getElementById('outputFormat').value;
             
             try {
                 const blob = new Blob([chunk.content], { type: 'text/plain' });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = `Base64-${getCurrentDateTime()}-${chunk.index + 1}-${chunk.total}-${chunk.fileName}.txt`;
+                const extension = outputFormat === 'xlsx' ? 'xlsx' : 'txt';
+                a.download = `Base64-${getCurrentDateTime()}-${chunk.index + 1}-${chunk.total}-${chunk.fileName}.${extension}`;
                 document.body.appendChild(a);
                 a.click();
                 document.body.removeChild(a);
@@ -431,12 +487,17 @@
                 fileName: null,
                 fileSize: null,
                 chunks: [],
-                totalChunks: 0
+                totalChunks: 0,
+                fileType: null
             };
 
             // 读取所有文件
             let filesProcessed = 0;
             for (let i = 0; i < files.length; i++) {
+                const file = files[i];
+                const fileExtension = file.name.split('.').pop().toLowerCase();
+                fileInfo.fileType = fileExtension;
+
                 const reader = new FileReader();
                 reader.onload = function(e) {
                     filesProcessed++;
@@ -477,7 +538,7 @@
                         mergeChunks(fileInfo);
                     }
                 };
-                reader.readAsText(files[i]);
+                reader.readAsText(file);
             }
         }
 
@@ -494,7 +555,8 @@
                     chunks: fileInfo.chunks,
                     totalChunks: fileInfo.totalChunks,
                     fileName: fileInfo.fileName,
-                    fileSize: fileInfo.fileSize
+                    fileSize: fileInfo.fileSize,
+                    fileType: fileInfo.fileType
                 }
             });
 
